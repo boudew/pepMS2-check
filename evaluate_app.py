@@ -32,11 +32,11 @@ import importlib                                                       # noqa: E
 import inspect                                                         # noqa: E402
 import metrics_explorer as mx                                          # noqa: E402
 mx = importlib.reload(mx)                                              # pick up a replaced metrics_explorer.py without restarting
-mx.apply_style()
-if 'source_path' not in inspect.signature(mx.main).parameters:
-    st.error('metrics_explorer.py next to this app is the old version. Copy the new metrics_explorer.py into the same '
-             f'folder ({HERE}) and reload this page.')
+if 'source_path' not in inspect.signature(mx.main).parameters or not hasattr(mx, 'apply_style'):
+    st.error('metrics_explorer.py in this folder is an old version. Replace it with the newest metrics_explorer.py '
+             f'(folder: {HERE}) and reload this page.')
     st.stop()
+mx.apply_style()
 
 
 # ---------------------------------------------------------------- helpers

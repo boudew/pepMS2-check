@@ -24,9 +24,27 @@ METRICS = {'cosine': 'cosine similarity', 'bond_cosine': 'bond-level cosine (b +
 THEMES = {  # colours for the figures (transparent background, so they follow the Streamlit theme)
     'light': dict(ink='#0b0b0b', ink2='#52514e', grid='#e4e3df', series='#2a78d6', bar='#c3d3ea'),
     'dark': dict(ink='#ffffff', ink2='#c3c2b7', grid='#3a3a38', series='#3987e5', bar='#34445e')}
+plt.rcParams.update({'font.size': 11, 'axes.labelsize': 11, 'xtick.labelsize': 10, 'ytick.labelsize': 10})
+STYLE = '''<style>
+.block-container {padding-top: 2.4rem; max-width: 1400px;}
+h1 {font-size: 1.85rem !important; font-weight: 650 !important; letter-spacing: -0.01em;}
+h5 {font-weight: 620 !important; margin: 0.9rem 0 0.2rem 0 !important;}
+[data-testid="stMetricValue"] {font-size: 1.75rem; font-weight: 620;}
+[data-testid="stMetricLabel"] p {opacity: 0.7; font-size: 0.85rem;}
+[data-testid="stVerticalBlockBorderWrapper"] {border-radius: 12px;}
+</style>'''
 SEQ_CMAP = LinearSegmentedColormap.from_list('seq', ['#dbe7f8', '#2a78d6', '#0f3a7a'])   # one hue, light -> dark
 GROUP_COLUMNS = {'group': 'group', 'n': 'spectra', 'median': 'median', 'ci_low': '95% CI low', 'ci_high': '95% CI high',
                  'q25': '25%', 'q75': '75%', 'mean': 'mean', 'vs_overall': 'vs overall median', 'differs': 'differs'}
+
+
+# ---------------------------------------------------------------- style
+def apply_style():
+    st.markdown(STYLE, unsafe_allow_html=True)
+
+
+def heading(text):
+    st.markdown(f'##### {text}')
 
 
 # ---------------------------------------------------------------- data
@@ -189,7 +207,7 @@ def dot_fig(stats, th, xlabel, ylabel, overall, bounds, numeric=False, min_n=1, 
         return None
     fmt = fmt or (lambda v: str(int(v)) if numeric else str(v))
     x = s['group'].to_numpy(float) if numeric else np.arange(len(s), dtype=float)
-    fig, (ax, axn) = plt.subplots(2, 1, figsize=(7.6, 4.4), sharex=True, gridspec_kw=dict(height_ratios=[3, 1], hspace=0.12))
+    fig, (ax, axn) = plt.subplots(2, 1, figsize=(6.8, 4.4), sharex=True, gridspec_kw=dict(height_ratios=[3, 1], hspace=0.12))
     fig.patch.set_alpha(0)
     _style(ax, th)
     _style(axn, th)
@@ -199,7 +217,7 @@ def dot_fig(stats, th, xlabel, ylabel, overall, bounds, numeric=False, min_n=1, 
     ax.set_ylim(max(lo - pad, bounds[0]), min(hi + pad, bounds[1]))
     ax.axhline(overall, color=th['ink2'], lw=1, ls='--')
     ax.text(1.012, overall, f'overall\nmedian\n{overall:.3f}', transform=ax.get_yaxis_transform(), ha='left',
-            va='center', fontsize=8, color=th['ink2'], linespacing=1.1)          # outside the plot: no collisions
+            va='center', fontsize=9, color=th['ink2'], linespacing=1.1)          # outside the plot: no collisions
     ax.vlines(x, s['ci_low'], s['ci_high'], color=th['series'], lw=1.4)
     ax.plot(x, s['median'], 'o', color=th['series'], ms=6.5, mew=0)
     ax.set_ylabel(ylabel, color=th['ink2'])
@@ -287,6 +305,7 @@ def main(source_path=None):
         st.caption('Which peptides does the model predict well, and which not? Reads the metrics.csv written by '
                    'compare_spectra.py.')
     th = THEMES[current_theme()]
+    apply_style()
 
     # ---------------- data
     with st.sidebar:
@@ -356,11 +375,14 @@ def main(source_path=None):
     label = METRICS[metric]
     bounds = (-1.0, 1.02) if metric == 'pearson' else (0.0, 1.02)
     overall = float(d[metric].median())
-    c1_, c2_, c3_, c4_ = st.columns(4)
-    c1_.metric('Spectra after filtering', f'{len(d):,}', f'{100 * len(d) / len(df):.1f}% of all', delta_color='off')
-    c2_.metric(f'Median {label}', f'{overall:.3f}')
-    c3_.metric(f'Mean {label}', f'{d[metric].mean():.3f}')
-    c4_.metric(f'Share with {label} >= 0.8', f'{100 * (d[metric] >= 0.8).mean():.1f}%')
+    kpis = [('Spectra after filtering', f'{len(d):,}', f'{100 * len(d) / len(df):.1f}% of all spectra'),
+            (f'Median {label}', f'{overall:.3f}', 'half of the spectra score higher'),
+            (f'Mean {label}', f'{d[metric].mean():.3f}', 'average over all spectra'),
+            (f'Share with {label} >= 0.8', f'{100 * (d[metric] >= 0.8).mean():.1f}%', f'{int((d[metric] >= 0.8).sum()):,} spectra')]
+    for col, (k_label, k_value, k_note) in zip(st.columns(4), kpis):
+        with col.container(border=True):
+            st.metric(k_label, k_value)
+            st.caption(k_note or '\u00a0')
     if n_invalid:
         st.caption(f'{n_invalid:,} filtered spectra have no valid {label} (flat spectrum) and are left out.')
 
@@ -370,40 +392,38 @@ def main(source_path=None):
     with tab_over:
         left, right = st.columns(2)
         with left:
-            st.subheader(f'Distribution of {label}')
+            heading(f'Distribution of {label}')
             show_fig(hist_fig(d[metric], th, label, overall, bounds[0]), 'No data.')
         with right:
-            st.subheader('Length and charge together')
-            if has_charge:
-                pv = pair_table(d, 'length', 'charge', metric, min_n)
-                show_fig(heat_fig(pv, th, f'median {label}', 'peptide length', 'precursor charge',
-                                  row_fmt=lambda v: str(int(v)), col_fmt=lambda v: f'{v:.0f}+'),
-                         f'No length/charge combination has {min_n} or more spectra.')
-            else:
-                st.info('No precursor charge in this file (run format_measured.py and compare_spectra.py with the '
-                        'metadata file next to measured.csv).')
-        if {'b_share_measured', 'b_share_predicted'} <= set(d.columns):
-            st.subheader('b/y balance')
-            left, right = st.columns(2)
-            with left:
+            if {'b_share_measured', 'b_share_predicted'} <= set(d.columns):
+                heading('b/y balance')
                 show_fig(balance_fig(d.sample(min(len(d), 5000), random_state=0), th), 'No data.')
-            with right:
                 dd = d['b_share_predicted'] - d['b_share_measured']
                 st.write(f'Median measured b-share {d["b_share_measured"].median():.2f}, predicted '
                          f'{d["b_share_predicted"].median():.2f}. Predicted minus measured: median {dd.median():+.2f}.')
-                st.caption('Points above the dashed line: the model predicts more b-ion intensity than was measured; '
-                           'below it, more y. A large shift here means the model puts the charge on the wrong half of '
-                           'the peptide. Compare "cosine" with "bond-level cosine" (Score, sidebar): if the bond-level '
-                           'score is much higher, the model knows where the peptide breaks, but not which side keeps the charge.')
+                with st.expander('How to read this'):
+                    st.write('Points above the dashed line: the model predicts more b-ion intensity than was measured; '
+                             'below it, more y. A large shift means the model puts the charge on the wrong half of '
+                             'the peptide. Compare "cosine" with "bond-level cosine" (Score, sidebar): if the bond-level '
+                             'score is much higher, the model knows where the peptide breaks, but not which side keeps the charge.')
+        heading('Length and charge together')
+        if has_charge:
+            pv = pair_table(d, 'length', 'charge', metric, min_n)
+            show_fig(heat_fig(pv.T if pv is not None else None, th, f'median {label}', 'precursor charge', 'peptide length',
+                              row_fmt=lambda v: f'{v:.0f}+', col_fmt=lambda v: str(int(v))),
+                     f'No length/charge combination has {min_n} or more spectra.')
+        else:
+            st.info('No precursor charge in this file (run format_measured.py and compare_spectra.py with the '
+                    'metadata file next to measured.csv).')
         left, right = st.columns(2)
         len_stats = group_stats(d, 'length', metric, overall, min_effect)
         with left:
-            st.subheader('By peptide length')
+            heading('By peptide length')
             show_fig(dot_fig(len_stats, th, 'peptide length (residues)', label, overall, bounds, numeric=True, min_n=min_n),
                      f'No length has {min_n} or more spectra.')
             st.markdown(findings(len_stats[len_stats['n'] >= min_n], 'Length', fmt=lambda v: str(int(v))))
         with right:
-            st.subheader('By precursor charge')
+            heading('By precursor charge')
             if has_charge:
                 ch_stats = group_stats(d, 'charge', metric, overall, min_effect)
                 show_fig(dot_fig(ch_stats, th, 'precursor charge', label, overall, bounds, numeric=True, min_n=min_n,
@@ -438,16 +458,16 @@ def main(source_path=None):
         c_stats = group_stats(dv, f'C{pos_c}', '_v', ov, min_effect)
         left, right = st.columns(2)
         with left:
-            st.subheader(f'By N{pos_n} residue')
+            heading(f'By N{pos_n} residue')
             show_fig(dot_fig(n_stats, th, f'N{pos_n} residue', label, ov, bounds, min_n=min_n, sort_desc=True),
                      f'No residue has {min_n} or more spectra.')
         with right:
-            st.subheader(f'By C{pos_c} residue')
+            heading(f'By C{pos_c} residue')
             show_fig(dot_fig(c_stats, th, f'C{pos_c} residue', label, ov, bounds, min_n=min_n, sort_desc=True),
                      f'No residue has {min_n} or more spectra.')
         st.markdown(findings(n_stats[n_stats['n'] >= min_n], f'N{pos_n}'))
         st.markdown(findings(c_stats[c_stats['n'] >= min_n], f'C{pos_c}'))
-        st.subheader(f'N{pos_n} and C{pos_c} together')
+        heading(f'N{pos_n} and C{pos_c} together')
         n_ok, c_ok = n_stats[n_stats['n'] >= min_n], c_stats[c_stats['n'] >= min_n]
         pv = pair_table(dv, f'N{pos_n}', f'C{pos_c}', '_v', min_n,
                         row_order=list(n_ok.sort_values('median', ascending=False)['group']),
@@ -476,10 +496,10 @@ def main(source_path=None):
         k = st.slider('Spectra to list', 5, 200, 25, key='k')
         left, right = st.columns(2)
         with left:
-            st.subheader('Worst predicted')
+            heading('Worst predicted')
             st.dataframe(d.nsmallest(k, metric)[cols].round(3), hide_index=True)
         with right:
-            st.subheader('Best predicted')
+            heading('Best predicted')
             st.dataframe(d.nlargest(k, metric)[cols].round(3), hide_index=True)
         st.caption('For de novo sequences, a very low score can also mean the sequence itself is wrong.')
 
