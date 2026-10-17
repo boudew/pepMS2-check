@@ -10,8 +10,8 @@ Needs:  streamlit pandas numpy matplotlib torch, and in the SAME folder: format_
         metrics_explorer.py, peptide_model.py, peptide_predictor.pt (and split_assignment.tsv for the unseen-only test).
 
 Every run gets its own folder under runs/ (input copy, measured.csv, comparison/ ...), so earlier results stay available.
-Large files: Streamlit accepts uploads up to 200 MB by default. For bigger files give the path of the file or folder
-on this computer instead, or start with:  streamlit run evaluate_app.py --server.maxUploadSize 2000
+Large files: Streamlit accepts uploads up to 200 MB by default; for bigger files start with
+    streamlit run evaluate_app.py --server.maxUploadSize 2000
 """
 import os
 import re
@@ -88,8 +88,6 @@ with st.expander('1. Run an evaluation', expanded=not has_result):
     with left:
         ups = st.file_uploader('Measured spectra (.tsv / .txt / .tab, several files allowed)', type=['tsv', 'txt', 'tab'],
                                accept_multiple_files=True, key='ev_files')
-        local = st.text_input('or a file / folder / wildcard on this computer', '', key='ev_local',
-                              help='For very large files. Example: data/*.tsv or C:\\data\\library.tsv')
     with right:
         model_path = st.session_state.get('ev_model', str(HERE / 'peptide_predictor.pt'))      # editable under 'More options'
         meta = None
@@ -106,7 +104,7 @@ with st.expander('1. Run an evaluation', expanded=not has_result):
             how = st.radio('Collision energy (HCD, NCE)', ['one value for the whole file', 'from a column in the file'],
                            key='ev_how')
             if how.startswith('one'):
-                default = 28.0 if min(es) <= 28 <= max(es) else float(es[len(es) // 2])
+                default = 30.0 if min(es) <= 30 <= max(es) else float(es[len(es) // 2])
                 energy = st.number_input('NCE', float(min(es)), float(max(es)), default, 1.0, format='%g', key='ev_energy')
                 st.caption('Model trained at NCE ' + ', '.join(f'{e:g}' for e in es) + '. Values in between are interpolated.')
             else:
@@ -119,25 +117,24 @@ with st.expander('1. Run an evaluation', expanded=not has_result):
             use_split = st.checkbox('Compare only peptides the model has not seen', value=True, key='ev_unseen',
                                     help='Uses split_assignment.tsv from the training notebook to leave out peptides that were in the training data.')
 
-    force_z, activation, min_peaks, carb, mods, tol, examples = 'from the file', '', 2, False, 'skip', 0.05, 12   # defaults when the options are closed
+    force_z, min_peaks, carb, mods, tol, examples = 'from the file', 3, False, 'skip', 0.0, 12   # defaults when the options are closed
     if st.checkbox('More options', key='ev_more'):                    # (expanders cannot be nested)
-        c1, c2, c3 = st.columns(3)
+        c1, c2 = st.columns(2)
         zs = (meta or {}).get('charges') or []
         force_z = c1.selectbox('Precursor charge', ['from the file'] + [f'{z}+ for every spectrum' for z in zs], key='ev_z',
                                disabled=not zs)
-        activation = c2.text_input('Only this activation mode (e.g. HCD)', '', key='ev_act')
-        min_peaks = c3.number_input('Min. y/b peaks per spectrum', 1, 20, 2, key='ev_minpeaks')
+        min_peaks = c2.number_input('Min. y/b peaks per spectrum', 1, 20, 3, key='ev_minpeaks')
         c4, c5, c6 = st.columns(3)
         carb = c4.checkbox('Cysteines carbamidomethylated', False, key='ev_carb')
         mods = c5.selectbox('Modified peptides', ['skip', 'ignore'], key='ev_mods',
                             help='skip: drop peptides with modifications; ignore: keep them and treat the sequence as unmodified')
-        tol = c6.number_input('Mass tolerance for y/b peaks (Da, 0 = no check)', 0.0, 1.0, 0.05, 0.01, format='%.2f', key='ev_tol')
+        tol = c6.number_input('Mass tolerance for y/b peaks (Da, 0 = no check)', 0.0, 1.0, 0.0, 0.01, format='%.2f', key='ev_tol')
         examples = st.number_input('Mirror plots to draw (examples.pdf, 0 = none)', 0, 100, 12, key='ev_examples')
         st.text_input('Model file', str(HERE / 'peptide_predictor.pt'), key='ev_model')
 
-    name_default = safe_name(Path(ups[0].name).stem) if ups else (safe_name(Path(local).stem) if local.strip() else '')
+    name_default = safe_name(Path(ups[0].name).stem) if ups else ''
     run_label = st.text_input('Name of this run', name_default, key='ev_name')
-    ready = bool(meta) and bool(ups or local.strip())
+    ready = bool(meta) and bool(ups)
     go = st.button('Run evaluation', type='primary', disabled=not ready, key='ev_go')
 
     if go:
@@ -149,8 +146,6 @@ with st.expander('1. Run an evaluation', expanded=not has_result):
             p = in_dir / safe_name(u.name)
             p.write_bytes(u.getbuffer())
             inputs.append(str(p))
-        if local.strip():
-            inputs.append(local.strip())
         n_frag = str(meta['n_frag'])                                   # always matches the model
         fm = [sys.executable, 'format_measured.py', *inputs, '-o', str(run_dir / 'measured.csv'), '--n-frag', n_frag,
               '--min-peaks', str(int(min_peaks)), '--mods', mods, '--mass-tol', str(tol)]
@@ -158,8 +153,6 @@ with st.expander('1. Run an evaluation', expanded=not has_result):
             fm += ['--energy', f'{energy:g}']
         elif energy_col:
             fm += ['--energy-col', energy_col]
-        if activation.strip():
-            fm += ['--activation', activation.strip()]
         if carb:
             fm += ['--carbamidomethyl']
         cs = [sys.executable, 'compare_spectra.py', str(run_dir / 'measured.csv'), '--model', model_path,
