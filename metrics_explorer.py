@@ -2,7 +2,8 @@
 
 Reads metrics.csv (written by compare_spectra.py). Filter by peptide length, precursor charge, number of measured
 ions and terminal residues, and compare groups: dots are the median score, bars the 95% confidence interval of
-that median, and the lower panel shows how many spectra each group has.
+that median, and the lower panel shows how many spectra each group has. When metrics.csv has retention-time
+columns (compare_spectra.py with the RT model), a Retention time tab shows predicted vs measured RT and RT outliers.
 
 Start:  streamlit run metrics_explorer.py
 Needs:  pip install streamlit pandas numpy matplotlib
@@ -10,6 +11,8 @@ Needs:  pip install streamlit pandas numpy matplotlib
 import io
 import math
 import os
+import sys
+from pathlib import Path
 
 import matplotlib
 matplotlib.use('Agg')
@@ -22,8 +25,8 @@ import streamlit as st                                             # noqa: E402
 METRICS = {'cosine': 'cosine similarity', 'bond_cosine': 'bond-level cosine (b + complementary y)',
            'spectral_angle': 'spectral angle similarity', 'pearson': 'Pearson r'}
 THEMES = {  # colours for the figures (transparent background, so they follow the Streamlit theme)
-    'light': dict(ink='#0b0b0b', ink2='#52514e', grid='#e4e3df', series='#2a78d6', bar='#c3d3ea'),
-    'dark': dict(ink='#ffffff', ink2='#c3c2b7', grid='#3a3a38', series='#3987e5', bar='#34445e')}
+    'light': dict(ink='#0b0b0b', ink2='#52514e', grid='#e4e3df', series='#2a78d6', bar='#c3d3ea', accent='#eb6834'),
+    'dark': dict(ink='#ffffff', ink2='#c3c2b7', grid='#3a3a38', series='#3987e5', bar='#34445e', accent='#d95926')}
 plt.rcParams.update({'font.size': 11, 'axes.labelsize': 11, 'xtick.labelsize': 10, 'ytick.labelsize': 10})
 STYLE = '''<style>
 .block-container {padding-top: 2.4rem; max-width: 1400px;}
@@ -87,7 +90,13 @@ def apply_filters(df, f):
             m &= df[col].isin(f[key])
     if f.get('source') and 'source_file' in df:
         m &= df['source_file'].isin(f['source'])
+    if f.get('drop_rt_outliers') and 'rt_outlier' in df:
+        m &= df['rt_outlier'].fillna(0) != 1
     return df[m]
+
+
+def has_rt(df):
+    return 'rt_abs_error_min' in df.columns and np.isfinite(pd.to_numeric(df['rt_abs_error_min'], errors='coerce')).any()
 
 
 # ---------------------------------------------------------------- statistics
@@ -198,6 +207,33 @@ def balance_fig(d, th):
     return fig
 
 
+def rt_fig(d, th):
+    """Predicted against measured RT; RT outliers marked. Dashed line = perfect prediction."""
+    fig, ax = plt.subplots(figsize=(6.4, 4.0))
+    fig.patch.set_alpha(0)
+    _style(ax, th)
+    out = d['rt_outlier'] == 1 if 'rt_outlier' in d else pd.Series(False, index=d.index)
+    early = d['rt_early'] == 1 if 'rt_early' in d else pd.Series(False, index=d.index)
+    lo = float(min(d['rt_measured_min'].min(), d['rt_predicted_min'].min()))
+    hi = float(max(d['rt_measured_min'].max(), d['rt_predicted_min'].max()))
+    ax.plot([lo, hi], [lo, hi], color=th['ink2'], lw=1, ls='--')
+    if early.any():
+        ax.axvspan(d['rt_measured_min'].min(), d.loc[early, 'rt_measured_min'].max(), color=th['ink2'], alpha=0.08, lw=0)
+        ax.scatter(d.loc[early, 'rt_measured_min'], d.loc[early, 'rt_predicted_min'], s=14, color=th['ink2'], alpha=0.35,
+                   linewidths=0, label='early-eluting (not scored)')
+    ok = ~out & ~early
+    ax.scatter(d.loc[ok, 'rt_measured_min'], d.loc[ok, 'rt_predicted_min'], s=14, color=th['series'], alpha=0.4,
+               linewidths=0, label='spectra')
+    if out.any():
+        ax.scatter(d.loc[out, 'rt_measured_min'], d.loc[out, 'rt_predicted_min'], s=34, color=th['accent'], marker='x',
+                   linewidths=1.6, label='RT outlier')
+    ax.legend(frameon=False, labelcolor=th['ink2'], loc='upper left')
+    ax.set_xlabel('measured RT (min)', color=th['ink2'])
+    ax.set_ylabel('predicted RT (min)', color=th['ink2'])
+    fig.tight_layout()
+    return fig
+
+
 def dot_fig(stats, th, xlabel, ylabel, overall, bounds, numeric=False, min_n=1, sort_desc=False, fmt=None):
     """Median (dot) with 95% CI (bar) per group, spectra per group below. None if no group is large enough."""
     s = stats[stats['n'] >= min_n]
@@ -296,9 +332,152 @@ def display_table(stats, label):
     return t.round(3)
 
 
+# ---------------------------------------------------------------- retention time tab
+def rt_tab(d, metric, label, th, min_n, min_effect):
+    r_all = d[np.isfinite(pd.to_numeric(d['rt_abs_error_min'], errors='coerce'))]
+    if r_all.empty:
+        st.info('No spectrum in the current selection has a predicted RT.')
+        return
+    early = r_all['rt_early'] == 1 if 'rt_early' in r_all else pd.Series(False, index=r_all.index)
+    r = r_all[~early]
+    if r.empty:
+        st.info('All spectra with a predicted RT are in the early-elution zone.')
+        return
+    ae = r['rt_abs_error_min']
+    out = r['rt_outlier'] == 1 if 'rt_outlier' in r else pd.Series(False, index=r.index)
+    base = (r['rt_measured_min'] - r.groupby(r.get('rt_calibration', pd.Series('', index=r.index)))['rt_measured_min']
+            .transform('median')).abs().median()
+    kpis = [('Spectra with predicted RT', f'{len(r_all):,}',
+             f'{int(early.sum()):,} early-eluting, not scored' if early.any() else f'{100 * len(r) / len(d):.0f}% of the filtered spectra'),
+            ('Median RT error', f'{ae.median():.2f} min', f'predicting the median RT for all: {base:.2f} min'),
+            ('95% of spectra within', f'{ae.quantile(0.95):.2f} min', f'mean signed error {r["rt_error_min"].mean():+.2f} min'),
+            ('RT outliers', f'{int(out.sum()):,}', 'far from the typical error')]
+    for col, (k_label, k_value, k_note) in zip(st.columns(4), kpis):
+        with col.container(border=True):
+            st.metric(k_label, k_value)
+            st.caption(k_note)
+    if 'rt_model_seen' in r and r['rt_model_seen'].astype(bool).any():
+        seen = r['rt_model_seen'].astype(bool)
+        retrained = 'rt_calibration' in r and r['rt_calibration'].astype(str).str.contains('retrained').any()
+        other = (f'Peptides that were not in it: median {r.loc[~seen, "rt_abs_error_min"].median():.2f} min '
+                 f'({int((~seen).sum()):,} spectra).' if (~seen).any() else '')
+        if retrained:
+            st.warning(f'{seen.mean():.0%} of these spectra are peptides the RT model was retrained on: their RT error is '
+                       f'too optimistic (median {r.loc[seen, "rt_abs_error_min"].median():.2f} min). '
+                       + (other + ' That is the fair number.' if other else
+                          'None is new to the model, so there is no fair RT error for this run.'))
+        else:
+            st.caption(f'{seen.mean():.0%} of these spectra are peptides that were part of the calibration (e.g. spiked '
+                       f'standard peptides, median error {r.loc[seen, "rt_abs_error_min"].median():.2f} min). A '
+                       f'calibration has only 2-3 parameters, so this barely flatters them. {other}')
+    if ae.median() >= base:
+        st.warning('The RT predictions are no better than predicting the median RT for every peptide. With a standard '
+                   'or an uploaded model this usually means it was measured with a different LC method or gradient; '
+                   'otherwise the RT model does not capture this LC method well.')
+    if early.any():
+        st.caption(f'Early-elution zone: {int(early.sum()):,} spectra elute before {r_all.loc[early, "rt_measured_min"].max():.2f} '
+                   'min (grey in the plot). They hardly interact with the column and come off around the void time '
+                   'whatever their sequence, so their RT cannot be predicted (median error there '
+                   f'{r_all.loc[early, "rt_abs_error_min"].median():.2f} min). They are a chromatography effect, not '
+                   'wrong identifications: left out of the numbers here and of the calibration, and flagged as RT '
+                   'outlier only when their error is extreme even for that zone.')
+    calib = r['rt_calibration'].dropna().unique() if 'rt_calibration' in r else []
+    if len(calib):
+        st.caption('Calibration: ' + ', '.join(str(c) for c in calib) + '. Library calibrations are cross-validated: '
+                   'every predicted RT comes from a calibration fitted without that peptide (I/L merged).')
+    left, right = st.columns(2)
+    with left:
+        heading('Predicted against measured RT')
+        show_fig(rt_fig(r_all.sample(min(len(r_all), 8000), random_state=0), th), 'No data.')
+    with right:
+        heading('RT error by peptide length')
+        overall = float(ae.median())
+        st_len = group_stats(r, 'length', 'rt_abs_error_min', overall, min_effect)
+        show_fig(dot_fig(st_len, th, 'peptide length (residues)', 'absolute RT error (min)', overall,
+                         (0.0, float('inf')), numeric=True, min_n=min_n), f'No length has {min_n} or more spectra.')
+        st.markdown(findings(st_len[st_len['n'] >= min_n], 'Length', fmt=lambda v: str(int(v))))
+        st.caption('Lower is better here: "clearly lower" means a smaller RT error than overall.')
+    heading(f'RT outliers ({int(out.sum()):,})')
+    if out.any():
+        cols = [c for c in ('Peptide', 'length', 'charge', 'rt_measured_min', 'rt_predicted_min', 'rt_error_min',
+                            metric, 'cosine', 'source_file', 'source_row', 'row') if c in r.columns]
+        cols = list(dict.fromkeys(cols))
+        t = r[out].sort_values('rt_abs_error_min', ascending=False)[cols]
+        n_good = int((r.loc[out, metric] >= 0.8).sum())
+        st.write(f'{n_good:,} of them have {label} >= 0.8: their spectrum fits the sequence well, so for these the RT '
+                 'disagreement more likely points to an isomer, a modification or a wrong RT than to a wrong sequence.'
+                 if n_good else f'None of them has {label} >= 0.8, which fits with misidentifications.')
+        st.dataframe(t.round(3), hide_index=True)
+        st.download_button('Download RT outliers', t.to_csv(index=False).encode('utf-8'), file_name='rt_outliers.csv',
+                           mime='text/csv', key='dl_rt_out')
+    else:
+        st.write('No spectrum is far from the typical RT error.')
+    with st.expander('How RT outliers are defined'):
+        st.write('A spectrum is an RT outlier when its RT error (predicted minus measured) is more than 4 robust '
+                 'standard deviations (1.4826 x median absolute deviation) away from the median error of its '
+                 'calibration group, and at least 0.5 min. Spectra in the early-elution zone are compared with the '
+                 'typical error of that zone instead, so the usual early blob is not flagged. The zone is found from the start of the gradient, as long as the typical error there is shifted by '
+                 'at least 1 min compared with the mid-gradient (or set by hand in the evaluation options). Use '
+                 '"Leave out RT outliers" in the sidebar to see how the spectrum scores change without them.')
+
+
 # ---------------------------------------------------------------- app
-def main(source_path=None):
-    """source_path: show this metrics.csv directly (used by evaluate_app.py, which also sets the page config and title)."""
+def filters_description(df, length, charge, min_ions, min_frac, min_kept, n1, c1, source, drop_rt_out):
+    parts = []
+    lo, hi = int(df['length'].min()), int(df['length'].max())
+    if tuple(length) != (lo, hi):
+        parts.append(f'length {length[0]}-{length[1]}')
+    if charge:
+        parts.append('charge ' + ', '.join(f'{z:.0f}+' for z in charge))
+    if min_ions > 1:
+        parts.append(f'at least {min_ions} measured ions')
+    if min_frac > 0:
+        parts.append(f'share of possible ions >= {min_frac:.2f}')
+    if min_kept > 0:
+        parts.append(f'share of intensity in plain y/b >= {min_kept:.2f}')
+    if n1:
+        parts.append('N1 ' + ''.join(n1))
+    if c1:
+        parts.append('C1 ' + ''.join(c1))
+    if source:
+        parts.append('files ' + ', '.join(source))
+    if drop_rt_out:
+        parts.append('RT outliers left out')
+    return '; '.join(parts)
+
+
+def report_section(d, df, metric, label, bounds, min_n, min_effect, filters_text, run_dir, title):
+    """Sidebar block: build the PDF report for the current view and offer it for download."""
+    try:
+        import evaluation_report
+    except ImportError:
+        return
+    st.header('Report')
+    sig = (len(d), metric, filters_text, min_n, min_effect, str(run_dir), title)
+    if st.button('Build PDF report', key='build_report',
+                 help='One PDF with everything shown here for the current filters and score: key numbers, all '
+                      'figures with their findings, retention time, worst/best spectra, the run reports and the '
+                      'mirror plots.'):
+        with st.spinner('Building the report...'):
+            try:
+                st.session_state['report_pdf'] = (sig, evaluation_report.build_report(
+                    d, df, metric, label, bounds, min_n, min_effect, filters_text, run_dir=run_dir, title=title,
+                    explorer=sys.modules[__name__]))
+            except Exception as e:
+                st.session_state.pop('report_pdf', None)
+                st.error(f'Could not build the report: {e}')
+    rep = st.session_state.get('report_pdf')
+    if rep and rep[0] == sig:
+        name = ''.join(ch if ch.isalnum() or ch in '-_' else '_' for ch in (title or 'evaluation'))
+        st.download_button('Download PDF report', rep[1], file_name=f'{name}_report.pdf', mime='application/pdf',
+                           key='dl_report')
+    elif rep:
+        st.caption('Filters changed since the last report: build it again.')
+
+
+def main(source_path=None, run_dir=None):
+    """source_path: show this metrics.csv directly (used by evaluate_app.py, which also sets the page config and title).
+    run_dir: the run folder (for the PDF report: input files, run reports, mirror plots)."""
     if source_path is None:
         st.set_page_config(page_title='Prediction quality explorer', layout='wide')
         st.title('Prediction quality explorer')
@@ -353,6 +532,12 @@ def main(source_path=None):
         source = []
         if 'source_file' in df.columns and df['source_file'].nunique() > 1:
             source = st.multiselect('Source file (empty = all)', sorted(df['source_file'].dropna().unique()), key='src')
+        drop_rt_out = False
+        if 'rt_outlier' in df.columns and (df['rt_outlier'] == 1).any():
+            drop_rt_out = st.checkbox(f'Leave out RT outliers ({int((df["rt_outlier"] == 1).sum()):,})', value=False,
+                                      key='drop_rt_out',
+                                      help='Spectra whose measured RT is far from the predicted RT. These are often '
+                                           'misidentifications (or co-eluting isomers), which also lowers the spectrum scores.')
         st.header('Analysis')
         min_n = int(st.number_input('Hide groups with fewer spectra than', 1, 100000, 30, key='min_n'))
         min_effect = float(st.number_input('Smallest difference that counts', 0.0, 0.5, 0.01, 0.005, format='%.3f',
@@ -365,7 +550,7 @@ def main(source_path=None):
                                   'residue is only credited with what length and charge do not already explain.')
 
     d = apply_filters(df, dict(length=length, charge=charge, min_ions=min_ions, min_frac=min_frac, min_kept=min_kept, n1=n1, c1=c1,
-                               source=source))
+                               source=source, drop_rt_outliers=drop_rt_out))
     n_invalid = int(d[metric].isna().sum())
     d = d[d[metric].notna()]
     if d.empty:
@@ -374,6 +559,12 @@ def main(source_path=None):
 
     label = METRICS[metric]
     bounds = (-1.0, 1.02) if metric == 'pearson' else (0.0, 1.02)
+    with st.sidebar:
+        title = Path(run_dir).name if run_dir else (Path(source_path).parent.parent.name if source_path else
+                                                     os.path.splitext(os.path.basename(path))[0])
+        report_section(d, df, metric, label, bounds, min_n, min_effect,
+                       filters_description(df, length, charge, min_ions, min_frac, min_kept, n1, c1, source, drop_rt_out),
+                       run_dir, title)
     overall = float(d[metric].median())
     kpis = [('Spectra after filtering', f'{len(d):,}', f'{100 * len(d) / len(df):.1f}% of all spectra'),
             (f'Median {label}', f'{overall:.3f}', 'half of the spectra score higher'),
@@ -386,7 +577,9 @@ def main(source_path=None):
     if n_invalid:
         st.caption(f'{n_invalid:,} filtered spectra have no valid {label} (flat spectrum) and are left out.')
 
-    tab_over, tab_term, tab_rank, tab_data = st.tabs(['Overview', 'Terminal residues', 'Worst and best', 'Table'])
+    show_rt = has_rt(d)
+    tabs = st.tabs(['Overview', 'Terminal residues', 'Worst and best'] + (['Retention time'] if show_rt else []) + ['Table'])
+    tab_over, tab_term, tab_rank, tab_data = tabs[0], tabs[1], tabs[2], tabs[-1]
 
     # ---------------- overview
     with tab_over:
@@ -490,7 +683,8 @@ def main(source_path=None):
 
     # ---------------- worst / best
     cols = [c for c in ('Peptide', 'length', 'charge', metric, 'cosine', 'bond_cosine', 'n_measured_ions',
-                        'b_share_measured', 'b_share_predicted', 'top_ion_measured', 'top_ion_predicted', 'source_file', 'source_row', 'row') if c in d.columns]
+                        'b_share_measured', 'b_share_predicted', 'top_ion_measured', 'top_ion_predicted',
+                        'rt_measured_min', 'rt_predicted_min', 'rt_outlier', 'source_file', 'source_row', 'row') if c in d.columns]
     cols = list(dict.fromkeys(cols))                              # metric may already be one of the listed columns
     with tab_rank:
         k = st.slider('Spectra to list', 5, 200, 25, key='k')
@@ -502,6 +696,11 @@ def main(source_path=None):
             heading('Best predicted')
             st.dataframe(d.nlargest(k, metric)[cols].round(3), hide_index=True)
         st.caption('For de novo sequences, a very low score can also mean the sequence itself is wrong.')
+
+    # ---------------- retention time
+    if show_rt:
+        with tabs[3]:
+            rt_tab(d, metric, label, th, min_n, min_effect)
 
     # ---------------- table
     with tab_data:
